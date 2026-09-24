@@ -950,7 +950,7 @@ static int netObjectMgr__CountObjects(rage::netObjectMgr* objectMgr, TObjectPred
 		return g_origCountObjects(objectMgr, pred);
 	}
 
-	auto objectList = TheClones->GetObjectList();
+	const auto& objectList = TheClones->GetObjectList();
 
 	return std::count_if(objectList.begin(), objectList.end(), pred);
 }
@@ -1112,6 +1112,32 @@ static float VectorDistance(const float* point1, const float* point2)
 	return sqrtf((xd * xd) + (yd * yd) + (zd * zd));
 }
 
+struct NearPlayerEntry
+{
+	float distance;
+	CNetGamePlayer* player;
+};
+
+static int CollectNearPlayers(NearPlayerEntry* entries, int count, CNetGamePlayer* outArray[32], bool sorted)
+{
+	int outCount = std::min(count, 32);
+
+	if (sorted)
+	{
+		std::partial_sort(entries, entries + outCount, entries + count, [](const NearPlayerEntry& a, const NearPlayerEntry& b)
+		{
+			return a.distance < b.distance;
+		});
+	}
+
+	for (int i = 0; i < outCount; i++)
+	{
+		outArray[i] = entries[i].player;
+	}
+
+	return outCount;
+}
+
 #if GTA_FIVE
 static hook::cdecl_stub<float*(float*, CNetGamePlayer*, void*, bool)> getNetPlayerRelevancePosition([]()
 {
@@ -1162,9 +1188,10 @@ static int GetPlayersNearPoint(const float* point, float range, CNetGamePlayer* 
 		return g_origGetPlayersNearPoint(point, range, outArray, sorted, unkVal);
 	}
 
-	CNetGamePlayer* tempArray[512];
+	NearPlayerEntry tempArray[512];
 
 	int idx = 0;
+	bool unlimitedRange = (range >= 100000000.0f);
 
 	auto playerList = netInterface_GetRemotePhysicalPlayers();
 	for (int i = 0; i < netInterface_GetNumRemotePhysicalPlayers(); i++)
@@ -1175,33 +1202,29 @@ static int GetPlayersNearPoint(const float* point, float range, CNetGamePlayer* 
 		{
 			alignas(16) float vectorPos[4];
 
-			if (range >= 100000000.0f || VectorDistance(point, getNetPlayerRelevancePosition(vectorPos, player, nullptr, unkVal)) < range)
+			float distance = 0.0f;
+
+			if (!unlimitedRange || (sorted && !unkVal))
 			{
-				tempArray[idx] = player;
+				distance = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos, player, nullptr, unkVal));
+			}
+
+			if (unlimitedRange || distance < range)
+			{
+				float sortDistance = distance;
+
+				if (sorted && unkVal)
+				{
+					sortDistance = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos, player, nullptr, false));
+				}
+
+				tempArray[idx] = { sortDistance, player };
 				idx++;
 			}
 		}
 	}
 
-	if (sorted)
-	{
-		std::sort(tempArray, tempArray + idx, [point](CNetGamePlayer* a1, CNetGamePlayer* a2)
-		{
-			alignas(16) float vectorPos1[4];
-			alignas(16) float vectorPos2[4];
-
-			float d1 = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos1, a1, nullptr, false));
-			float d2 = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos2, a2, nullptr, false));
-
-			return (d1 < d2);
-		});
-	}
-
-	idx = std::min(idx, 32);
-
-	std::copy(tempArray, tempArray + idx, outArray);
-
-	return idx;
+	return CollectNearPlayers(tempArray, idx, outArray, sorted);
 }
 #elif IS_RDR3
 static int(*g_origGetPlayersNearPoint)(const float* point, uint32_t unkIndex, void* outIndex, CNetGamePlayer* outArray[32], bool unkVal, float range, bool sorted);
@@ -1213,9 +1236,10 @@ static int GetPlayersNearPoint(const float* point, uint32_t unkIndex, void* outI
 		return g_origGetPlayersNearPoint(point, unkIndex, outIndex, outArray, range, range, sorted);
 	}
 
-	CNetGamePlayer* tempArray[512];
+	NearPlayerEntry tempArray[512];
 
 	int idx = 0;
+	bool unlimitedRange = (range >= 100000000.0f);
 
 	auto playerList = netInterface_GetRemotePhysicalPlayers();
 	for (int i = 0; i < netInterface_GetNumRemotePhysicalPlayers(); i++)
@@ -1226,32 +1250,23 @@ static int GetPlayersNearPoint(const float* point, uint32_t unkIndex, void* outI
 		{
 			alignas(16) float vectorPos[4];
 
-			if (range >= 100000000.0f || VectorDistance(point, getNetPlayerRelevancePosition(vectorPos, player, nullptr)) < range)
+			float distance = 0.0f;
+
+			if (!unlimitedRange || sorted)
 			{
-				tempArray[idx] = player;
+				distance = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos, player, nullptr));
+			}
+
+			if (unlimitedRange || distance < range)
+			{
+				tempArray[idx] = { distance, player };
 				idx++;
 			}
 		}
 	}
 
-	if (sorted)
-	{
-		std::sort(tempArray, tempArray + idx, [point](CNetGamePlayer* a1, CNetGamePlayer* a2)
-		{
-			alignas(16) float vectorPos1[4];
-			alignas(16) float vectorPos2[4];
-
-			float d1 = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos1, a1, nullptr));
-			float d2 = VectorDistance(point, getNetPlayerRelevancePosition(vectorPos2, a2, nullptr));
-
-			return (d1 < d2);
-		});
-	}
-
-	idx = std::min(idx, 32);
+	idx = CollectNearPlayers(tempArray, idx, outArray, sorted);
 	unkIndex = idx;
-
-	std::copy(tempArray, tempArray + idx, outArray);
 
 	return idx;
 }
